@@ -64,7 +64,7 @@ sub status_string ($) {
    return $message;
 }
 
-my $MINUS_FLAG;
+my $MINUS_FLAG = 0;
 my $MAIN_TARGET;
 my $MAIN_DEP;
 my $Makefile = "Makefile";
@@ -136,9 +136,14 @@ sub mtime ($) {
 # helper function for exec_command
 # returns the string to for the actual command
 sub parse_cmd($) {
-  my $ret_str =~ @_;
-  $ret_str =~ s/\$@/$MAIN_TARGET/g;
-  $ret_str =~ s/\$>/$MAIN_DEP/g;
+  my $ret_str = @_;
+  $ret_str =~ s/\$@/$MAIN_TARGET;/g;
+  $ret_str =~ s/\$\^/$MAIN_DEP/g;
+  # check for MACROS
+  while ($ret_str =~ /\$\((.*?)\)/g) {
+     $ret_str =~ s/\$\((.*?)\)/$MACROS{$1}/;
+     say "curr item: $1"
+  }
   print "The command about to be executed: "
   print $ret_str;
   return ret_str;
@@ -147,33 +152,49 @@ sub parse_cmd($) {
 # processes and executes a command
 sub exec_command($) {
   # @ contains the single command and its args
-  my $cmd_str = @_;
+  my ($cmd_str) = @_;
+  say "cmd_str: $cmd_str";
   my $cmd_ret_val;
   my $actual_cmd;
   $actual_cmd = parse_cmd($cmd_str);
-  if ($cmd_str =~ /^@(\S+)/) {
+  my $special_cmd;
+
+  if ($actual_cmd =~ /^@(.*)/) {
     # exec the cmd
-    actual_cmd = $1;
-    cmd_ret_val = system(actual_cmd);
+    $special_cmd = $1;
+    say "special_cmd: $1";
+    $cmd_ret_val = system($special_cmd);
   }
-  else if ($cmd_str =~ /^-/) {
-    actual_cmd = $1;
-    cmd_ret_val = system(actual_cmd);
-    # make sure pmake doesn't exit
+  elsif ($actual_cmd =~ /^-(.*)/) {
+    $special_cmd = $1;
+    say "special_cmd: $1";
+    $cmd_ret_val = system($special_cmd);
+    $MINUS_FLAG = 1;
     # set a global flag or something
+    return;
   }
   else {
-    cmd_ret_val = system(actual_cmd);
-    system("echo ${actual_cmd}");
+    $cmd_ret_val = system($actual_cmd);
+    print "the echoed command: ";
+    system("echo $actual_cmd");
   }
 
-  my $term_signal = $? & 0x7F;
-  my $core_dumped = $? & 0x80;
-  my $exit_status = ($? >> 8) & 0xFF;
+  unless ($cmd_ret_val == 0) {
+    # print the string error to stderr
+    say "An error has occured :("
+  }
+
+  $TERM_SIGNAL = $? & 0x7F;
+  $CORE_DUMPED = $? & 0x80;
+  $EXIT_STATUS = ($? >> 8) & 0xFF;
+  say "term_signal is $TERM_SIGNAL";
+  say "core_dumped is $CORE_DUMPED";
+  say "exit_status is $EXIT_STATUS";
 
   # if /^@/ then don't echo
   # else if /^-/ then make sure pmake doesn't exit
   # else echo the command to stdout system("echo ...")
+  return;
 }
 
 # return value: 0 if nothing needs to be done
