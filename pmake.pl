@@ -64,10 +64,16 @@ sub status_string ($) {
    return $message;
 }
 
+# Global Scalars
 my $MINUS_FLAG = 0;
 my $MAIN_TARGET;
 my $MAIN_DEP;
 my $Makefile = "Makefile";
+my $TERM_SIGNAL;
+my $CORE_DUMPED;
+my $EXIT_STATUS;
+
+# Global Hashes
 my %OPTIONS;
 my %GRAPH;
 my %MACROS;
@@ -126,13 +132,6 @@ sub load_Makefile() {
    close $mkfile;
 }
 
-# helper function for check_file_date
-sub mtime ($) {
-   my ($filename) = @_;
-   my @stat = stat $filename;
-   return @stat ? $stat[9] : undef;
-}
-
 # helper function for exec_command
 # returns the string to for the actual command
 sub parse_cmd($) {
@@ -156,8 +155,10 @@ sub exec_command($) {
   say "cmd_str: $cmd_str";
   my $cmd_ret_val;
   my $actual_cmd;
-  $actual_cmd = parse_cmd($cmd_str);
   my $special_cmd;
+
+  # substitute all macros
+  $actual_cmd = parse_cmd($cmd_str);
 
   if ($actual_cmd =~ /^@(.*)/) {
     # exec the cmd
@@ -200,16 +201,53 @@ sub exec_command($) {
 # return value: 0 if nothing needs to be done
 # 1 if target needs to be made (command should execute)
 sub check_file_date() {
-  #gonna need the target and one of its pre-requisites
+#gonna need the target and one of its pre-requisites
   my ($target_file, $dep_file) = @_;
-  my target_mod_time = mtime($target_file);
-  my dep_mod_time = mtime($dep_file);
-  if (target_mod_time < dep_mod_time) {
+  my $target_mod_time = mtime($target_file);
+  my $dep_mod_time = mtime($dep_file);
+  if ($target_mod_time < $dep_mod_time) {
     return 1;
   }
   else {
     return 0;
   }
+}
+
+# try to get to the deepest target
+sub make_target() {
+  # check the target's dependencies to see if they are also a target
+  my ($target) = @_;
+  my @curr_deps;
+  @curr_deps = @GRAPH{$target}{PREREQS};
+  foreach (@curr_deps) {
+    if ($GRAPH{$_}) {
+      make_target($_);
+    }
+  }
+  $MAIN_TARGET = $target;
+  $MAIN_DEP = $curr_deps[0];
+  # once there are no dependencies that are apart of the GRAPH, then start comparing modify times
+  if (scalar(@curr_deps)) {
+    # then the target does have deps and their times must be compared
+    for my $curr_dep_item(@curr_deps) {
+      # check the time - if time is greater, then exec commands and return
+      last if (check_file_date($target, $curr_dep_item)) {
+        # then dep is older and the commands need to be executed
+        foreach(@GRAPH{$target}{COMMANDS}) {
+          # call exec_command
+          print "command ***$_*** is about to be executed\n";
+          exec_command($_);
+        }
+      }
+    }
+  }
+  else {
+    # if the target has no deps, then just execute the commands
+    foreach(@GRAPH{$target}{COMMANDS}) {
+      exec_command($_);
+    }
+  }
+  # if the modify times of the deps are greater than the curr target, then exec the commands
 }
 
 sub exec_Makefile() {
