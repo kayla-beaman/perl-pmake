@@ -6,6 +6,7 @@ use Getopt::Std;
 use Data::Dumper;
 use strict;
 use warnings;
+use feature qw(say);
 
 $Data::Dumper::Indent = 1;
 $Data::Dumper::Sortkeys = 1;
@@ -77,7 +78,7 @@ my $EXIT_STATUS;
 my %OPTIONS;
 my %GRAPH;
 my %MACROS;
-my %RULES;
+my %MADE_TARGETS;
 
 sub usage() { die "Usage: $0 [-d] [target]\n" }
 sub stop($) { die "$Makefile:@_. Stop.\n" }
@@ -117,8 +118,7 @@ sub load_Makefile() {
          $GRAPH{$target}{PREREQS} = [split ' ', $2];
          $GRAPH{$target}{LINE} = $.;
          $MAIN_TARGET = $target unless $MAIN_TARGET;
-         my @prereqs = @GRAPH{$target}{PREREQS};
-         $MAIN_TARGET = $prereqs[0] unless $MAIN_DEP;
+         $MAIN_DEP = $GRAPH{$target}{PREREQS}[0] unless $MAIN_DEP;
       }elsif ($line =~ m/^\t(.*)/) {                            # a command is encountered
          if (defined $target) {
             push @{$GRAPH{$target}{COMMANDS}}, $1;
@@ -132,27 +132,42 @@ sub load_Makefile() {
    close $mkfile;
 }
 
+sub mtime ($) {
+   my ($filename) = @_;
+   my @stat = stat $filename;
+   return @stat ? $stat[9] : undef;
+}
+
 # helper function for exec_command
 # returns the string to for the actual command
 sub parse_cmd($) {
-  my $ret_str = @_;
+  my ($ret_str) = @_;
   $ret_str =~ s/\$@/$MAIN_TARGET;/g;
-  $ret_str =~ s/\$\^/$MAIN_DEP/g;
+  $ret_str =~ s/\$</$MAIN_DEP/g;
   # check for MACROS
   while ($ret_str =~ /\$\((.*?)\)/g) {
      $ret_str =~ s/\$\((.*?)\)/$MACROS{$1}/;
      say "curr item: $1"
   }
-  print "The command about to be executed: "
-  print $ret_str;
-  return ret_str;
+  return $ret_str;
+}
+
+sub error_handle() {
+  $TERM_SIGNAL = $? & 0x7F;
+  $CORE_DUMPED = $? & 0x80;
+  $EXIT_STATUS = ($? >> 8) & 0xFF;
+  say "term_signal is $TERM_SIGNAL";
+  say "core_dumped is $CORE_DUMPED";
+  say "exit_status is $EXIT_STATUS";
+  print "exit status: $strsignal{$EXIT_STATUS}\n";
+  die "An error has occured, pmake has been aborted\n";
 }
 
 # processes and executes a command
 sub exec_command($) {
   # @ contains the single command and its args
   my ($cmd_str) = @_;
-  say "cmd_str: $cmd_str";
+  #say "cmd_str: $cmd_str";
   my $cmd_ret_val;
   my $actual_cmd;
   my $special_cmd;
@@ -161,40 +176,20 @@ sub exec_command($) {
   $actual_cmd = parse_cmd($cmd_str);
 
   if ($actual_cmd =~ /^@(.*)/) {
-    # exec the cmd
     $special_cmd = $1;
-    say "special_cmd: $1";
-    $cmd_ret_val = system($special_cmd);
+    system($special_cmd) == 0 or error_handle;
   }
   elsif ($actual_cmd =~ /^-(.*)/) {
     $special_cmd = $1;
-    say "special_cmd: $1";
-    $cmd_ret_val = system($special_cmd);
+    system($special_cmd);
     $MINUS_FLAG = 1;
-    # set a global flag or something
     return;
   }
   else {
-    $cmd_ret_val = system($actual_cmd);
-    print "the echoed command: ";
+    system($actual_cmd) == 0 or error_handle;
     system("echo $actual_cmd");
   }
 
-  unless ($cmd_ret_val == 0) {
-    # print the string error to stderr
-    say "An error has occured :("
-  }
-
-  $TERM_SIGNAL = $? & 0x7F;
-  $CORE_DUMPED = $? & 0x80;
-  $EXIT_STATUS = ($? >> 8) & 0xFF;
-  say "term_signal is $TERM_SIGNAL";
-  say "core_dumped is $CORE_DUMPED";
-  say "exit_status is $EXIT_STATUS";
-
-  # if /^@/ then don't echo
-  # else if /^-/ then make sure pmake doesn't exit
-  # else echo the command to stdout system("echo ...")
   return;
 }
 
@@ -205,6 +200,9 @@ sub check_file_date() {
   my ($target_file, $dep_file) = @_;
   my $target_mod_time = mtime($target_file);
   my $dep_mod_time = mtime($dep_file);
+  # unless ($target_mod_time && $dep_mod_time) {
+  #   die "Error: file $target_file or $dep_file missing\n";
+  # }
   if ($target_mod_time < $dep_mod_time) {
     return 1;
   }
@@ -214,50 +212,65 @@ sub check_file_date() {
 }
 
 # try to get to the deepest target
-sub make_target() {
-  # check the target's dependencies to see if they are also a target
+sub make_target {
   my ($target) = @_;
-  my @curr_deps;
-  @curr_deps = @GRAPH{$target}{PREREQS};
-  foreach (@curr_deps) {
+  my $curr_deps;
+  my $curr_commands;
+  $curr_deps = $GRAPH{$target}{PREREQS};
+
+  # check the target's dependencies to see if they are also a target
+  foreach (@{$curr_deps}) {
     if ($GRAPH{$_}) {
       make_target($_);
     }
   }
+
+  # set the main target to the current target
+  # and the first dependency on the list to the main dependency (if they exist)
   $MAIN_TARGET = $target;
-  $MAIN_DEP = $curr_deps[0];
-  # once there are no dependencies that are apart of the GRAPH, then start comparing modify times
-  if (scalar(@curr_deps)) {
-    # then the target does have deps and their times must be compared
-    for my $curr_dep_item(@curr_deps) {
-      # check the time - if time is greater, then exec commands and return
-      last if (check_file_date($target, $curr_dep_item)) {
-        # then dep is older and the commands need to be executed
-        foreach(@GRAPH{$target}{COMMANDS}) {
-          # call exec_command
-          print "command ***$_*** is about to be executed\n";
-          exec_command($_);
+  if (scalar(@{$curr_deps})) {
+    $MAIN_DEP = ${$curr_deps}[0];
+  }
+
+  $curr_commands = $GRAPH{$target}{COMMANDS};
+
+  # once we have gotten the deepest target on the GRAPH, then start comparing modify times
+  if (scalar(@{$curr_deps})) {
+    # then the target does have deps and their modify times must be compared
+      for my $curr_dep_item(@{$curr_deps}) {
+        # check the time - if the dep's modify time is greater, then exec commands and return
+        if ( (!(-e $target)) ) {
+          $MADE_TARGETS{$target}{"is_Made"} = 1;
+          for my $element(@{$curr_commands}) {
+            # the dep is newer - call exec_command
+            exec_command($element);
+          }
+          last;
+        }
+        elsif ( (&check_file_date($target, $curr_dep_item)) ) {
+          $MADE_TARGETS{$target}{"is_Made"} = 1;
+          for my $element(@{$curr_commands}) {
+            # the dep is newer - call exec_command
+            exec_command($element);
+          }
+          last;
         }
       }
-    }
   }
   else {
     # if the target has no deps, then just execute the commands
-    foreach(@GRAPH{$target}{COMMANDS}) {
-      exec_command($_);
+    for my $element (@{$curr_commands}) {
+      exec_command($element);
     }
   }
-  # if the modify times of the deps are greater than the curr target, then exec the commands
-}
 
-sub exec_Makefile() {
-  # an attempt to execute the loaded Makefile
-
-  # go through the entire hash of targets and make them recursively
+  return;
 }
 
 scan_cmdline;
 load_Makefile;
+# Call makefile on MAIN TARGET first
+make_target($MAIN_TARGET);
 
 print "%MACROS: ", Data::Dumper->Dump ([\%MACROS]) if $OPTIONS{'d'};
 print "%GRAPH: ", Data::Dumper->Dump ([\%GRAPH]) if $OPTIONS{'d'};
